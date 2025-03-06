@@ -15,7 +15,7 @@
 #include "include/v8-platform.h"
 #include "src/base/bounded-page-allocator.h"
 #include "src/base/export-template.h"
-#include "src/base/functional.h"
+#include "src/base/hashing.h"
 #include "src/base/macros.h"
 #include "src/base/platform/mutex.h"
 #include "src/base/platform/semaphore.h"
@@ -118,12 +118,6 @@ class MemoryAllocator {
     DCHECK_LT(0, commit_page_size_bits_);
     return commit_page_size_bits_;
   }
-
-  // Computes the memory area of discardable memory within a given memory area
-  // [addr, addr+size) and returns the result as base::AddressRegion. If the
-  // memory is not discardable base::AddressRegion is an empty region.
-  V8_EXPORT_PRIVATE static base::AddressRegion ComputeDiscardMemoryArea(
-      Address addr, size_t size);
 
   V8_EXPORT_PRIVATE MemoryAllocator(Isolate* isolate,
                                     v8::PageAllocator* code_page_allocator,
@@ -239,12 +233,14 @@ class MemoryAllocator {
 
   Address HandleAllocationFailure(Executability executable);
 
-#if defined(V8_ENABLE_CONSERVATIVE_STACK_SCANNING) || defined(DEBUG)
   // Return the normal or large page that contains this address, if it is owned
   // by this heap, otherwise a nullptr.
   V8_EXPORT_PRIVATE const MemoryChunk* LookupChunkContainingAddress(
       Address addr) const;
-#endif  // V8_ENABLE_CONSERVATIVE_STACK_SCANNING || DEBUG
+  // This version can be used when all threads are either parked or in a
+  // safepoint. In that case we can skip taking a mutex.
+  V8_EXPORT_PRIVATE const MemoryChunk* LookupChunkContainingAddressInSafepoint(
+      Address addr) const;
 
   // Insert and remove normal and large pages that are owned by this heap.
   void RecordMemoryChunkCreated(const MemoryChunk* chunk);
@@ -272,7 +268,7 @@ class MemoryAllocator {
   static size_t ComputeChunkSize(size_t area_size, AllocationSpace space);
 
   // Internal allocation method for all pages/memory chunks. Returns data about
-  // the unintialized memory region.
+  // the uninitialized memory region.
   V8_WARN_UNUSED_RESULT std::optional<MemoryChunkAllocationResult>
   AllocateUninitializedChunk(BaseSpace* space, size_t area_size,
                              Executability executable, PageSize page_size) {
@@ -445,7 +441,6 @@ class MemoryAllocator {
   base::Mutex executable_memory_mutex_;
 #endif  // DEBUG
 
-#if defined(V8_ENABLE_CONSERVATIVE_STACK_SCANNING) || defined(DEBUG)
   // Allocated normal and large pages are stored here, to be used during
   // conservative stack scanning.
   std::unordered_set<const MemoryChunk*, base::hash<const MemoryChunk*>>
@@ -453,7 +448,6 @@ class MemoryAllocator {
   std::set<const MemoryChunk*> large_pages_;
 
   mutable base::Mutex chunks_mutex_;
-#endif  // V8_ENABLE_CONSERVATIVE_STACK_SCANNING || DEBUG
 
   V8_EXPORT_PRIVATE static size_t commit_page_size_;
   V8_EXPORT_PRIVATE static size_t commit_page_size_bits_;

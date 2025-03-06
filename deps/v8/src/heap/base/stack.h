@@ -9,6 +9,7 @@
 #include <vector>
 
 #include "src/base/macros.h"
+#include "src/base/platform/mutex.h"
 #include "src/base/platform/platform.h"
 
 namespace heap::base {
@@ -18,12 +19,6 @@ class StackVisitor {
   virtual ~StackVisitor() = default;
   virtual void VisitPointer(const void* address) = 0;
 };
-
-#if defined(__has_feature)
-#if __has_feature(safe_stack)
-#define V8_USE_SAFE_STACK 1
-#endif  // __has_feature(safe_stack)
-#endif  // defined(__has_feature)
 
 // Abstraction over the stack. Supports handling of:
 // - native stack;
@@ -61,9 +56,6 @@ class V8_EXPORT_PRIVATE Stack final {
   // Word-aligned iteration of the stack, starting at the `stack_marker_`
   // and going to the stack start. Slot values are passed on to `visitor`.
   void IteratePointersUntilMarker(StackVisitor* visitor) const;
-
-  void AddStackSegment(const void* start, const void* top);
-  void ClearStackSegments();
 
   // Iterate just the background stacks, if any.
   void IterateBackgroundStacks(StackVisitor* visitor) const;
@@ -212,9 +204,6 @@ class V8_EXPORT_PRIVATE Stack final {
   }
 
   Segment current_segment_;
-
-  // TODO(v8:13493): If inactive stacks are not used anymore, clean this up.
-  std::vector<Segment> inactive_stacks_;
 
   mutable v8::base::Mutex lock_;
   std::map<ThreadId, Segment> background_stacks_;

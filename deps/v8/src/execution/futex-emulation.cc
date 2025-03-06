@@ -299,43 +299,39 @@ Tagged<Object> WaitJsTranslateReturn(Isolate* isolate, Tagged<Object> res) {
 
 }  // namespace
 
-Tagged<Object> FutexEmulation::WaitJs32(Isolate* isolate, WaitMode mode,
-                                        Handle<JSArrayBuffer> array_buffer,
-                                        size_t addr, int32_t value,
-                                        double rel_timeout_ms) {
+Tagged<Object> FutexEmulation::WaitJs32(
+    Isolate* isolate, WaitMode mode, DirectHandle<JSArrayBuffer> array_buffer,
+    size_t addr, int32_t value, double rel_timeout_ms) {
   Tagged<Object> res =
       Wait<int32_t>(isolate, mode, array_buffer, addr, value, rel_timeout_ms);
   return WaitJsTranslateReturn(isolate, res);
 }
 
-Tagged<Object> FutexEmulation::WaitJs64(Isolate* isolate, WaitMode mode,
-                                        Handle<JSArrayBuffer> array_buffer,
-                                        size_t addr, int64_t value,
-                                        double rel_timeout_ms) {
+Tagged<Object> FutexEmulation::WaitJs64(
+    Isolate* isolate, WaitMode mode, DirectHandle<JSArrayBuffer> array_buffer,
+    size_t addr, int64_t value, double rel_timeout_ms) {
   Tagged<Object> res =
       Wait<int64_t>(isolate, mode, array_buffer, addr, value, rel_timeout_ms);
   return WaitJsTranslateReturn(isolate, res);
 }
 
-Tagged<Object> FutexEmulation::WaitWasm32(Isolate* isolate,
-                                          Handle<JSArrayBuffer> array_buffer,
-                                          size_t addr, int32_t value,
-                                          int64_t rel_timeout_ns) {
+Tagged<Object> FutexEmulation::WaitWasm32(
+    Isolate* isolate, DirectHandle<JSArrayBuffer> array_buffer, size_t addr,
+    int32_t value, int64_t rel_timeout_ns) {
   return Wait<int32_t>(isolate, WaitMode::kSync, array_buffer, addr, value,
                        rel_timeout_ns >= 0, rel_timeout_ns, CallType::kIsWasm);
 }
 
-Tagged<Object> FutexEmulation::WaitWasm64(Isolate* isolate,
-                                          Handle<JSArrayBuffer> array_buffer,
-                                          size_t addr, int64_t value,
-                                          int64_t rel_timeout_ns) {
+Tagged<Object> FutexEmulation::WaitWasm64(
+    Isolate* isolate, DirectHandle<JSArrayBuffer> array_buffer, size_t addr,
+    int64_t value, int64_t rel_timeout_ns) {
   return Wait<int64_t>(isolate, WaitMode::kSync, array_buffer, addr, value,
                        rel_timeout_ns >= 0, rel_timeout_ns, CallType::kIsWasm);
 }
 
 template <typename T>
 Tagged<Object> FutexEmulation::Wait(Isolate* isolate, WaitMode mode,
-                                    Handle<JSArrayBuffer> array_buffer,
+                                    DirectHandle<JSArrayBuffer> array_buffer,
                                     size_t addr, T value,
                                     double rel_timeout_ms) {
   DCHECK_LT(addr, array_buffer->GetByteLength());
@@ -371,7 +367,7 @@ double WaitTimeoutInMs(double timeout_ns) {
 
 template <typename T>
 Tagged<Object> FutexEmulation::Wait(Isolate* isolate, WaitMode mode,
-                                    Handle<JSArrayBuffer> array_buffer,
+                                    DirectHandle<JSArrayBuffer> array_buffer,
                                     size_t addr, T value, bool use_timeout,
                                     int64_t rel_timeout_ns,
                                     CallType call_type) {
@@ -385,11 +381,9 @@ Tagged<Object> FutexEmulation::Wait(Isolate* isolate, WaitMode mode,
 }
 
 template <typename T>
-Tagged<Object> FutexEmulation::WaitSync(Isolate* isolate,
-                                        Handle<JSArrayBuffer> array_buffer,
-                                        size_t addr, T value, bool use_timeout,
-                                        int64_t rel_timeout_ns,
-                                        CallType call_type) {
+Tagged<Object> FutexEmulation::WaitSync(
+    Isolate* isolate, DirectHandle<JSArrayBuffer> array_buffer, size_t addr,
+    T value, bool use_timeout, int64_t rel_timeout_ns, CallType call_type) {
   VMState<ATOMICS_WAIT> state(isolate);
   base::TimeDelta rel_timeout =
       base::TimeDelta::FromNanoseconds(rel_timeout_ns);
@@ -542,7 +536,8 @@ Global<T> GetWeakGlobal(Isolate* isolate, Local<T> object) {
 
 FutexWaitListNode::FutexWaitListNode(std::weak_ptr<BackingStore> backing_store,
                                      void* wait_location,
-                                     Handle<JSObject> promise, Isolate* isolate)
+                                     DirectHandle<JSObject> promise,
+                                     Isolate* isolate)
     : wait_location_(wait_location),
       waiting_(true),
       async_state_(std::make_unique<AsyncState>(
@@ -561,8 +556,9 @@ Tagged<Object> FutexEmulation::WaitAsync(
       base::TimeDelta::FromNanoseconds(rel_timeout_ns);
 
   Factory* factory = isolate->factory();
-  Handle<JSObject> result = factory->NewJSObject(isolate->object_function());
-  Handle<JSObject> promise_capability = factory->NewJSPromise();
+  DirectHandle<JSObject> result =
+      factory->NewJSObject(isolate->object_function());
+  DirectHandle<JSObject> promise_capability = factory->NewJSPromise();
 
   enum class ResultKind { kNotEqual, kTimedOut, kAsync };
   ResultKind result_kind;
@@ -654,7 +650,7 @@ Tagged<Object> FutexEmulation::WaitAsync(
       // Add the Promise into the NativeContext's atomics_waitasync_promises
       // set, so that the list keeps it alive.
       DirectHandle<NativeContext> native_context(isolate->native_context());
-      Handle<OrderedHashSet> promises(
+      DirectHandle<OrderedHashSet> promises(
           native_context->atomics_waitasync_promises(), isolate);
       promises = OrderedHashSet::Add(isolate, promises, promise_capability)
                      .ToHandleChecked();
@@ -795,7 +791,7 @@ void FutexEmulation::CleanupAsyncWaiterPromise(FutexWaitListNode* node) {
         *node->async_state_->native_context.Get(v8_isolate)));
 
     // Remove the Promise from the NativeContext's set.
-    Handle<OrderedHashSet> promises(
+    DirectHandle<OrderedHashSet> promises(
         native_context->atomics_waitasync_promises(), isolate);
     bool was_deleted = OrderedHashSet::Delete(isolate, *promises, *promise);
     DCHECK(was_deleted);
@@ -832,9 +828,9 @@ void FutexEmulation::ResolveAsyncWaiterPromise(FutexWaitListNode* node) {
     Local<v8::Context> native_context =
         node->async_state_->native_context.Get(v8_isolate);
     v8::Context::Scope contextScope(native_context);
-    Handle<JSPromise> promise = Cast<JSPromise>(
+    DirectHandle<JSPromise> promise = Cast<JSPromise>(
         Utils::OpenHandle(*node->async_state_->promise.Get(v8_isolate)));
-    Handle<String> result_string;
+    DirectHandle<String> result_string;
     // When waiters are notified, their timeout_time is reset. Having a
     // non-zero timeout_time here means the waiter timed out.
     if (node->async_state_->timeout_time != base::TimeTicks()) {
@@ -844,7 +840,7 @@ void FutexEmulation::ResolveAsyncWaiterPromise(FutexWaitListNode* node) {
       DCHECK(!node->waiting_);
       result_string = isolate->factory()->ok_string();
     }
-    MaybeHandle<Object> resolve_result =
+    MaybeDirectHandle<Object> resolve_result =
         JSPromise::Resolve(promise, result_string);
     DCHECK(!resolve_result.is_null());
     USE(resolve_result);

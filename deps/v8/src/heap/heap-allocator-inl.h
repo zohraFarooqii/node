@@ -76,6 +76,11 @@ V8_WARN_UNUSED_RESULT V8_INLINE AllocationResult HeapAllocator::AllocateRaw(
   DCHECK(AllowHeapAllocation::IsAllowed());
   CHECK(AllowHeapAllocationInRelease::IsAllowed());
   DCHECK(local_heap_->IsRunning());
+#if V8_ENABLE_WEBASSEMBLY
+  if (!v8_flags.wasm_jitless) {
+    trap_handler::AssertThreadNotInWasm();
+  }
+#endif
 #if DEBUG
   local_heap_->VerifyCurrent();
 #endif
@@ -201,29 +206,6 @@ AllocationResult HeapAllocator::AllocateRaw(int size_in_bytes,
   UNREACHABLE();
 }
 
-AllocationResult HeapAllocator::AllocateRawData(int size_in_bytes,
-                                                AllocationType type,
-                                                AllocationOrigin origin,
-                                                AllocationAlignment alignment) {
-  switch (type) {
-    case AllocationType::kYoung:
-      return AllocateRaw<AllocationType::kYoung>(size_in_bytes, origin,
-                                                 alignment);
-    case AllocationType::kOld:
-      return AllocateRaw<AllocationType::kOld>(size_in_bytes, origin,
-                                               alignment);
-    case AllocationType::kCode:
-    case AllocationType::kMap:
-    case AllocationType::kReadOnly:
-    case AllocationType::kSharedMap:
-    case AllocationType::kSharedOld:
-    case AllocationType::kTrusted:
-    case AllocationType::kSharedTrusted:
-      UNREACHABLE();
-  }
-  UNREACHABLE();
-}
-
 template <HeapAllocator::AllocationRetryMode mode>
 V8_WARN_UNUSED_RESULT V8_INLINE Tagged<HeapObject>
 HeapAllocator::AllocateRawWith(int size, AllocationType allocation,
@@ -257,6 +239,47 @@ HeapAllocator::AllocateRawWith(int size, AllocationType allocation,
     return object;
   }
   return HeapObject();
+}
+
+template <typename AllocateFunction, typename RetryFunction>
+V8_WARN_UNUSED_RESULT auto HeapAllocator::AllocateRawWithLightRetrySlowPath(
+    AllocateFunction&& Allocate, RetryFunction&& RetryAllocate,
+    AllocationType allocation) {
+  if (auto result = Allocate(allocation)) [[likely]] {
+    return result;
+  }
+
+  // Two GCs before returning failure.
+  CollectGarbage(allocation);
+  if (auto result = RetryAllocate(allocation)) {
+    return result;
+  }
+  CollectGarbage(allocation);
+  return RetryAllocate(allocation);
+}
+
+template <typename AllocateFunction, typename RetryFunction>
+auto HeapAllocator::AllocateRawWithRetryOrFailSlowPath(
+    AllocateFunction&& Allocate, RetryFunction&& RetryAllocate,
+    AllocationType allocation) {
+  if (auto result = AllocateRawWithLightRetrySlowPath(Allocate, RetryAllocate,
+                                                      allocation)) {
+    return result;
+  }
+
+  CollectAllAvailableGarbage(allocation);
+  if (auto result = RetryAllocate(allocation)) {
+    return result;
+  }
+
+  V8::FatalProcessOutOfMemory(heap_->isolate(), "CALL_AND_RETRY_LAST",
+                              V8::kHeapOOM);
+}
+
+template <typename Function>
+V8_WARN_UNUSED_RESULT auto HeapAllocator::CustomAllocateWithRetryOrFail(
+    Function&& Allocate, AllocationType allocation) {
+  return *AllocateRawWithRetryOrFailSlowPath(Allocate, Allocate, allocation);
 }
 
 }  // namespace internal

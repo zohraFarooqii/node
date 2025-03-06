@@ -11,6 +11,7 @@
 #include "src/maglev/maglev-graph.h"
 #include "src/maglev/maglev-ir.h"
 #include "src/maglev/maglev-regalloc-data.h"
+#include "src/zone/zone-containers.h"
 
 namespace v8 {
 namespace internal {
@@ -267,6 +268,9 @@ class StraightForwardRegisterAllocator {
   bool IsInRegister(MergePointRegisterState& target_state, ValueNode* incoming);
   bool IsForwardReachable(BasicBlock* start_block, NodeIdT first_id,
                           NodeIdT last_id);
+  bool AllUsedRegistersLiveAt(ConditionalControlNode* control_node,
+                              BasicBlock* target);
+  bool AllUsedRegistersLiveAt(BasicBlock* target);
 #endif
 
   template <typename RegisterT>
@@ -283,6 +287,8 @@ class StraightForwardRegisterAllocator {
   void MergeRegisterValues(ControlNode* control, BasicBlock* target,
                            int predecessor_id);
 
+  void ApplyPatches(BasicBlock* block);
+
   MaglevGraphLabeller* graph_labeller() const {
     return compilation_info_->graph_labeller();
   }
@@ -290,6 +296,12 @@ class StraightForwardRegisterAllocator {
   MaglevCompilationInfo* compilation_info_;
   std::unique_ptr<MaglevPrintingVisitor> printing_visitor_;
   Graph* graph_;
+  struct BlockPatch {
+    ptrdiff_t diff;
+    Node* new_node;
+  };
+  ZoneVector<BlockPatch> patches_;
+
   BlockConstIterator block_it_;
   NodeIterator node_it_;
   // The current node, whether a Node in the body or the ControlNode.

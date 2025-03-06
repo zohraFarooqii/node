@@ -43,7 +43,7 @@ void TestStubCacheOffsetCalculation(StubCache::Table table) {
     m.Return(m.SmiTag(result));
   }
 
-  Handle<Code> code = data.GenerateCode();
+  DirectHandle<Code> code = data.GenerateCode();
   FunctionTester ft(code, kNumParams);
 
   Factory* factory = isolate->factory();
@@ -123,7 +123,7 @@ TEST(TryProbeStubCache) {
   stub_cache.Clear();
 
   {
-    auto receiver = m.Parameter<Object>(1);
+    auto receiver = m.Parameter<JSAny>(1);
     auto name = m.Parameter<Name>(2);
     TNode<MaybeObject> expected_handler = m.UncheckedParameter<MaybeObject>(3);
 
@@ -149,7 +149,7 @@ TEST(TryProbeStubCache) {
     m.Return(m.BooleanConstant(false));
   }
 
-  Handle<Code> code = data.GenerateCode();
+  DirectHandle<Code> code = data.GenerateCode();
   FunctionTester ft(code, kNumParams);
 
   std::vector<Handle<Name>> names;

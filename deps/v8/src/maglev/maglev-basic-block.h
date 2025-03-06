@@ -19,8 +19,8 @@ namespace v8 {
 namespace internal {
 namespace maglev {
 
-using NodeIterator = Node::List::Iterator;
-using NodeConstIterator = Node::List::Iterator;
+using NodeIterator = ZoneVector<Node*>::iterator;
+using NodeConstIterator = ZoneVector<Node*>::const_iterator;
 
 class BasicBlock {
  public:
@@ -30,6 +30,7 @@ class BasicBlock {
 
   explicit BasicBlock(MergePointInterpreterFrameState* state, Zone* zone)
       : type_(state ? kMerge : kOther),
+        nodes_(zone),
         control_node_(nullptr),
         state_(state),
         reload_hints_(0, zone),
@@ -37,34 +38,61 @@ class BasicBlock {
 
   NodeIdT first_id() const {
     if (has_phi()) return phis()->first()->id();
-    if (nodes_.is_empty()) {
-      return control_node()->id();
-    }
-    auto node = nodes_.first();
-    while (node && node->Is<Identity>()) {
-      node = node->NextNode();
-    }
-    return node ? node->id() : control_node()->id();
+    return first_non_phi_id();
   }
 
-  NodeIdT FirstNonGapMoveId() const {
-    if (has_phi()) return phis()->first()->id();
-    if (!nodes_.is_empty()) {
-      for (const Node* node : nodes_) {
-        if (IsGapMoveNode(node->opcode())) continue;
-        if (node->Is<Identity>()) continue;
-        return node->id();
-      }
+  // For GDB: Print any basic block with `print bb->Print()`.
+  void Print() const;
+
+  NodeIdT first_non_phi_id() const {
+    for (const Node* node : nodes_) {
+      if (node == nullptr) continue;
+      if (!node->Is<Identity>()) return node->id();
     }
     return control_node()->id();
   }
 
-  Node::List& nodes() { return nodes_; }
+  NodeIdT FirstNonGapMoveId() const {
+    if (has_phi()) return phis()->first()->id();
+    for (const Node* node : nodes_) {
+      if (node == nullptr) continue;
+      if (IsGapMoveNode(node->opcode())) continue;
+      if (node->Is<Identity>()) continue;
+      return node->id();
+    }
+    return control_node()->id();
+  }
+
+  ZoneVector<Node*>& nodes() { return nodes_; }
 
   ControlNode* control_node() const { return control_node_; }
   void set_control_node(ControlNode* control_node) {
     DCHECK_NULL(control_node_);
     control_node_ = control_node;
+  }
+
+  ControlNode* reset_control_node() {
+    DCHECK_NOT_NULL(control_node_);
+    ControlNode* control = control_node_;
+    control_node_ = nullptr;
+    return control;
+  }
+
+  // Moves all nodes after |node| to the resulting ZoneVector, while keeping all
+  // nodes before |node| in the basic block. |node| itself is dropped.
+  ZoneVector<Node*> Split(Node* node, Zone* zone) {
+    size_t split = 0;
+    for (; split < nodes_.size(); split++) {
+      if (nodes_[split] == node) break;
+    }
+    CHECK_LT(split, nodes_.size());
+    size_t after_split = split + 1;
+    ZoneVector<Node*> result(nodes_.size() - after_split, zone);
+    for (size_t i = 0; i < result.size(); i++) {
+      result[i] = nodes_[i + after_split];
+    }
+    nodes_.resize(split);
+    return result;
   }
 
   bool has_phi() const { return has_state() && state_->has_phi(); }
@@ -92,7 +120,7 @@ class BasicBlock {
 
   void set_edge_split_block(BasicBlock* predecessor) {
     DCHECK_EQ(type_, kOther);
-    DCHECK(nodes_.is_empty());
+    DCHECK(nodes_.empty());
     DCHECK(control_node()->Is<Jump>());
     type_ = kEdgeSplit;
     predecessor_ = predecessor;
@@ -163,21 +191,27 @@ class BasicBlock {
   }
 
   template <typename Func>
-  void ForEachSuccessor(Func&& functor) const {
-    ControlNode* control = control_node();
-    if (auto node = control->TryCast<UnconditionalControlNode>()) {
-      functor(node->target());
-    } else if (auto node = control->TryCast<BranchControlNode>()) {
-      functor(node->if_true());
-      functor(node->if_false());
-    } else if (auto node = control->TryCast<Switch>()) {
-      for (int i = 0; i < node->size(); i++) {
-        functor(node->targets()[i].block_ptr());
+  static void ForEachSuccessorFollowing(ControlNode* control, Func&& functor) {
+    if (auto unconditional_control =
+            control->TryCast<UnconditionalControlNode>()) {
+      functor(unconditional_control->target());
+    } else if (auto branch = control->TryCast<BranchControlNode>()) {
+      functor(branch->if_true());
+      functor(branch->if_false());
+    } else if (auto switch_node = control->TryCast<Switch>()) {
+      for (int i = 0; i < switch_node->size(); i++) {
+        functor(switch_node->targets()[i].block_ptr());
       }
-      if (node->has_fallthrough()) {
-        functor(node->fallthrough());
+      if (switch_node->has_fallthrough()) {
+        functor(switch_node->fallthrough());
       }
     }
+  }
+
+  template <typename Func>
+  void ForEachSuccessor(Func&& functor) const {
+    ControlNode* control = control_node();
+    ForEachSuccessorFollowing(control, functor);
   }
 
   Label* label() {
@@ -215,7 +249,7 @@ class BasicBlock {
 
     BasicBlock* current = this;
     while (true) {
-      if (!current->nodes_.is_empty() || current->is_loop() ||
+      if (!current->nodes_.empty() || current->is_loop() ||
           current->is_exception_handler_block() ||
           current->HasPhisOrRegisterMerges()) {
         break;
@@ -279,7 +313,7 @@ class BasicBlock {
     kOther
   } type_;
   bool is_start_block_of_switch_case_ = false;
-  Node::List nodes_;
+  ZoneVector<Node*> nodes_;
   ControlNode* control_node_;
   union {
     MergePointInterpreterFrameState* state_;
@@ -301,17 +335,18 @@ class BasicBlock {
 
 inline base::SmallVector<BasicBlock*, 2> BasicBlock::successors() const {
   ControlNode* control = control_node();
-  if (auto node = control->TryCast<UnconditionalControlNode>()) {
-    return {node->target()};
-  } else if (auto node = control->TryCast<BranchControlNode>()) {
-    return {node->if_true(), node->if_false()};
-  } else if (auto node = control->TryCast<Switch>()) {
+  if (auto unconditional_control =
+          control->TryCast<UnconditionalControlNode>()) {
+    return {unconditional_control->target()};
+  } else if (auto branch = control->TryCast<BranchControlNode>()) {
+    return {branch->if_true(), branch->if_false()};
+  } else if (auto switch_node = control->TryCast<Switch>()) {
     base::SmallVector<BasicBlock*, 2> succs;
-    for (int i = 0; i < node->size(); i++) {
-      succs.push_back(node->targets()[i].block_ptr());
+    for (int i = 0; i < switch_node->size(); i++) {
+      succs.push_back(switch_node->targets()[i].block_ptr());
     }
-    if (node->has_fallthrough()) {
-      succs.push_back(node->fallthrough());
+    if (switch_node->has_fallthrough()) {
+      succs.push_back(switch_node->fallthrough());
     }
     return succs;
   } else {

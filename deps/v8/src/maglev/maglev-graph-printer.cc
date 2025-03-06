@@ -31,7 +31,10 @@ namespace maglev {
 
 namespace {
 
-int IntWidth(int val) { return std::ceil(std::log10(val + 1)); }
+int IntWidth(int val) {
+  if (val == -1) return 2;
+  return std::ceil(std::log10(val + 1));
+}
 
 int MaxIdWidth(MaglevGraphLabeller* graph_labeller, NodeIdT max_node_id,
                int padding_adjustement = 0) {
@@ -365,8 +368,34 @@ BlockProcessResult MaglevPrintingVisitor::PreProcessBasicBlock(
 
   int block_id = graph_labeller_->BlockId(block);
   os_ << "Block b" << block_id;
+  if (block->has_state() && block->state()->is_resumable_loop()) {
+    os_ << " (resumable)";
+  }
   if (block->is_exception_handler_block()) {
     os_ << " (exception handler)";
+  }
+  if (block->is_loop() && block->has_state()) {
+    if (block->state()->is_loop_with_peeled_iteration()) {
+      os_ << " peeled";
+    }
+    if (const LoopEffects* loop_effects = block->state()->loop_effects()) {
+      os_ << " (effects:";
+      if (loop_effects->unstable_aspects_cleared) {
+        if (loop_effects->unstable_aspects_cleared) {
+          os_ << " ua";
+        }
+        if (loop_effects->context_slot_written.size()) {
+          os_ << " c" << loop_effects->context_slot_written.size();
+        }
+        if (loop_effects->objects_written.size()) {
+          os_ << " o" << loop_effects->objects_written.size();
+        }
+        if (loop_effects->keys_cleared.size()) {
+          os_ << " k" << loop_effects->keys_cleared.size();
+        }
+      }
+      os_ << ")";
+    }
   }
   os_ << "\n";
 
@@ -1025,6 +1054,31 @@ void PrintNode::Print(std::ostream& os) const {
 
 void PrintNodeLabel::Print(std::ostream& os) const {
   graph_labeller_->PrintNodeLabel(os, node_);
+}
+
+// For GDB: Print any basic block with `print bb->Print()`.
+void BasicBlock::Print() const {
+  std::cout << "Block";
+  if (is_loop()) {
+    if (state()->is_loop_with_peeled_iteration()) {
+      std::cout << " (peeled loop)";
+    } else if (has_state() && state()->is_resumable_loop()) {
+      std::cout << " (resumable loop)";
+    } else {
+      std::cout << " (loop header)";
+    }
+  } else if (is_exception_handler_block()) {
+    std::cout << " (exception handler)";
+  }
+  std::cout << "\n";
+  for (auto node : nodes_) {
+    node->Print();
+  }
+  if (control_node_) {
+    control_node_->Print();
+  } else {
+    std::cout << " (missing control node)\n";
+  }
 }
 
 }  // namespace maglev

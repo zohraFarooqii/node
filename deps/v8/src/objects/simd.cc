@@ -155,6 +155,17 @@ inline int32_t reinterpret_vmaxvq_u64(uint64x2_t v) {
     }                                                                         \
   }
 
+#ifdef __SSE3__
+__m128i _mm_cmpeq_epi64_nosse4_2(__m128i a, __m128i b) {
+  __m128i res = _mm_cmpeq_epi32(a, b);
+  // For each 64-bit value swap results of lower 32 bits comparison with
+  // the results of upper 32 bits comparison.
+  __m128i res_swapped = _mm_shuffle_epi32(res, _MM_SHUFFLE(2, 3, 0, 1));
+  // Report match only when both upper and lower parts of 64-bit values match.
+  return _mm_and_si128(res, res_swapped);
+}
+#endif  // __SSE3__
+
 // Uses SIMD to vectorize the search loop. This function should only be called
 // for large-ish arrays. Note that nothing will break if |array_len| is less
 // than vectorization_threshold: things will just be slower than necessary.
@@ -162,11 +173,11 @@ template <typename T>
 inline uintptr_t fast_search_noavx(T* array, uintptr_t array_len,
                                    uintptr_t index, T search_element) {
   static constexpr bool is_uint32 =
-      sizeof(T) == sizeof(uint32_t) && std::is_integral<T>::value;
+      sizeof(T) == sizeof(uint32_t) && std::is_integral_v<T>;
   static constexpr bool is_uint64 =
-      sizeof(T) == sizeof(uint64_t) && std::is_integral<T>::value;
+      sizeof(T) == sizeof(uint64_t) && std::is_integral_v<T>;
   static constexpr bool is_double =
-      sizeof(T) == sizeof(double) && std::is_floating_point<T>::value;
+      sizeof(T) == sizeof(double) && std::is_floating_point_v<T>;
 
   static_assert(is_uint32 || is_uint64 || is_double);
 
@@ -204,12 +215,17 @@ inline uintptr_t fast_search_noavx(T* array, uintptr_t array_len,
 #undef MOVEMASK
 #undef EXTRACT
   } else if constexpr (is_uint64) {
-#define SET1(x) _mm_castsi128_ps(_mm_set1_epi64x(x))
-#define CMP(a, b) _mm_cmpeq_pd(_mm_castps_pd(a), _mm_castps_pd(b))
-#define EXTRACT(x) base::bits::CountTrailingZeros32(x)
-    VECTORIZED_LOOP_x86(__m128, __m128d, SET1, CMP, _mm_movemask_pd, EXTRACT)
-#undef SET1
-#undef CMP
+#define MOVEMASK(x) _mm_movemask_ps(_mm_castsi128_ps(x))
+// _mm_cmpeq_epi64_nosse4_2() might produce only the following non-zero
+// patterns:
+//   0b0011 -> 0 (the first value matches),
+//   0b1100 -> 1 (the second value matches),
+//   0b1111 -> 0 (both first and second value match).
+// Thus it's enough to check only the least significant bit.
+#define EXTRACT(x) (((x) & 1) ? 0 : 1)
+    VECTORIZED_LOOP_x86(__m128i, __m128i, _mm_set1_epi64x,
+                        _mm_cmpeq_epi64_nosse4_2, MOVEMASK, EXTRACT)
+#undef MOVEMASK
 #undef EXTRACT
   } else if constexpr (is_double) {
 #define EXTRACT(x) base::bits::CountTrailingZeros32(x)
@@ -259,11 +275,11 @@ TARGET_AVX2 inline uintptr_t fast_search_avx(T* array, uintptr_t array_len,
                                              uintptr_t index,
                                              T search_element) {
   static constexpr bool is_uint32 =
-      sizeof(T) == sizeof(uint32_t) && std::is_integral<T>::value;
+      sizeof(T) == sizeof(uint32_t) && std::is_integral_v<T>;
   static constexpr bool is_uint64 =
-      sizeof(T) == sizeof(uint64_t) && std::is_integral<T>::value;
+      sizeof(T) == sizeof(uint64_t) && std::is_integral_v<T>;
   static constexpr bool is_double =
-      sizeof(T) == sizeof(double) && std::is_floating_point<T>::value;
+      sizeof(T) == sizeof(double) && std::is_floating_point_v<T>;
 
   static_assert(is_uint32 || is_uint64 || is_double);
 
@@ -361,9 +377,12 @@ Address ArrayIndexOfIncludes(Address array_start, uintptr_t array_len,
   if constexpr (kind == ArrayIndexOfIncludesKind::DOUBLE) {
     Tagged<FixedDoubleArray> fixed_array =
         Cast<FixedDoubleArray>(Tagged<Object>(array_start));
-    double* array = static_cast<double*>(
-        fixed_array->RawField(FixedDoubleArray::OffsetOfElementAt(0))
-            .ToVoidPtr());
+    UnalignedDoubleMember* unaligned_array = fixed_array->begin();
+    // TODO(leszeks): This reinterpret cast is a bit sketchy because the values
+    // are unaligned doubles. Ideally we'd fix the search method to support
+    // UnalignedDoubleMember.
+    static_assert(sizeof(UnalignedDoubleMember) == sizeof(double));
+    double* array = reinterpret_cast<double*>(unaligned_array);
 
     double search_num;
     if (IsSmi(Tagged<Object>(search_element))) {
@@ -424,6 +443,184 @@ uintptr_t ArrayIndexOfIncludesDouble(Address array_start, uintptr_t array_len,
                                      Address search_element) {
   return ArrayIndexOfIncludes<ArrayIndexOfIncludesKind::DOUBLE>(
       array_start, array_len, from_index, search_element);
+}
+
+// http://0x80.pl/notesen/2014-09-21-convert-to-hex.html
+namespace {
+
+char NibbleToHex(uint8_t nibble) {
+  const char correction = 'a' - '0' - 10;
+  const char c = nibble + '0';
+  uint8_t temp = 128 - 10 + nibble;
+  uint8_t msb = temp & 0x80;
+  uint8_t mask = msb - (msb >> 7);
+  return c + (mask & correction);
+}
+
+void Uint8ArrayToHexSlow(const char* bytes, size_t length,
+                         DirectHandle<SeqOneByteString> string_output) {
+  int index = 0;
+  for (size_t i = 0; i < length; i++) {
+    uint8_t byte = bytes[i];
+    uint8_t high = byte >> 4;
+    uint8_t low = byte & 0x0F;
+
+    string_output->SeqOneByteStringSet(index++, NibbleToHex(high));
+    string_output->SeqOneByteStringSet(index++, NibbleToHex(low));
+  }
+}
+
+inline uint16_t ByteToHex(uint8_t byte) {
+  const uint16_t correction = (('a' - '0' - 10) << 8) + ('a' - '0' - 10);
+#if V8_TARGET_BIG_ENDIAN
+  const uint16_t nibbles = (byte << 4) + (byte & 0xF);
+#else
+  const uint16_t nibbles = ((byte & 0xF) << 8) + (byte >> 4);
+#endif
+  const uint16_t chars = nibbles + 0x3030;
+  const uint16_t temp = 0x8080 - 0x0A0A + nibbles;
+  const uint16_t msb = temp & 0x8080;
+  const uint16_t mask = msb - (msb >> 7);
+  return chars + (mask & correction);
+}
+
+V8_ALLOW_UNUSED void HandleRemainingNibbles(const char* bytes, uint8_t* output,
+                                            size_t length, size_t i) {
+  uint16_t* output_pairs = reinterpret_cast<uint16_t*>(output) + i;
+  bytes += i;
+  size_t rest = length & 0x7;
+  for (i = 0; i < rest; i++) {
+    *(output_pairs++) = ByteToHex(*bytes++);
+  }
+}
+
+/**
+The following procedure converts 16 nibbles at a time:
+
+uint8_t nine[9]         = packed_byte(9);
+uint8_t ascii0[9]       = packed_byte('0');
+uint8_t correction[9]   = packed_byte('a' - 10 - '0');
+
+// assembler
+movdqu    nibbles_x_16, %xmm0
+movdqa    %xmm0, %xmm1
+
+// convert to ASCII
+paddb     ascii0, %xmm1
+
+// make mask
+pcmpgtb   nine, %xmm0
+
+// correct result
+pand      correction, %xmm0
+paddb     %xmm1, %xmm0
+
+// save result...
+*/
+
+#ifdef __SSE3__
+void Uint8ArrayToHexFastWithSSE(const char* bytes, uint8_t* output,
+                                size_t length) {
+  size_t i;
+  size_t index = 0;
+  alignas(16) uint8_t nibbles_buffer[16];
+  for (i = 0; i + 8 <= length; i += 8) {
+    index = 0;
+    for (size_t j = i; j < i + 8; j++) {
+      nibbles_buffer[index++] = bytes[j] >> 4;    // High nibble
+      nibbles_buffer[index++] = bytes[j] & 0x0F;  // Low nibble
+    }
+
+    // Load data into SSE registers
+    __m128i nibbles =
+        _mm_load_si128(reinterpret_cast<__m128i*>(nibbles_buffer));
+    __m128i nine = _mm_set1_epi8(9);
+    __m128i ascii_0 = _mm_set1_epi8('0');
+    __m128i correction = _mm_set1_epi8('a' - 10 - '0');
+
+    // Make a copy for ASCII conversion
+    __m128i ascii_result = _mm_add_epi8(nibbles, ascii_0);
+
+    // Create a mask for values greater than 9
+    __m128i mask = _mm_cmpgt_epi8(nibbles, nine);
+
+    // Apply correction
+    __m128i corrected_result = _mm_and_si128(mask, correction);
+    corrected_result = _mm_add_epi8(ascii_result, corrected_result);
+
+    // Store the result
+    _mm_storeu_si128(reinterpret_cast<__m128i*>(&output[i * 2]),
+                     corrected_result);
+  }
+
+  HandleRemainingNibbles(bytes, output, length, i);
+}
+#endif
+
+#ifdef NEON64
+void Uint8ArrayToHexFastWithNeon(const char* bytes, uint8_t* output,
+                                 size_t length) {
+  size_t i;
+  size_t index = 0;
+  alignas(16) uint8_t nibbles_buffer[16];
+  for (i = 0; i + 8 <= length; i += 8) {
+    index = 0;
+    for (size_t j = i; j < i + 8; j++) {
+      nibbles_buffer[index++] = bytes[j] >> 4;    // High nibble
+      nibbles_buffer[index++] = bytes[j] & 0x0F;  // Low nibble
+    }
+
+    // Load data into NEON registers
+    uint8x16_t nibbles = vld1q_u8(nibbles_buffer);
+    uint8x16_t nine = vdupq_n_u8(9);
+    uint8x16_t ascii0 = vdupq_n_u8('0');
+    uint8x16_t correction = vdupq_n_u8('a' - 10 - '0');
+
+    // Make a copy for ASCII conversion
+    uint8x16_t ascii_result = vaddq_u8(nibbles, ascii0);
+
+    // Create a mask for values greater than 9
+    uint8x16_t mask = vcgtq_u8(nibbles, nine);
+
+    // Apply correction
+    uint8x16_t corrected_result = vandq_u8(mask, correction);
+    corrected_result = vaddq_u8(ascii_result, corrected_result);
+
+    // Store the result
+    vst1q_u8(&output[i * 2], corrected_result);
+  }
+
+  HandleRemainingNibbles(bytes, output, length, i);
+}
+#endif
+}  // namespace
+
+Tagged<Object> Uint8ArrayToHex(const char* bytes, size_t length,
+                               DirectHandle<SeqOneByteString> string_output) {
+#ifdef __SSE3__
+  if (get_vectorization_kind() == SimdKinds::kAVX2 ||
+      get_vectorization_kind() == SimdKinds::kSSE) {
+    {
+      DisallowGarbageCollection no_gc;
+      Uint8ArrayToHexFastWithSSE(bytes, string_output->GetChars(no_gc), length);
+    }
+    return *string_output;
+  }
+#endif
+
+#ifdef NEON64
+  if (get_vectorization_kind() == SimdKinds::kNeon) {
+    {
+      DisallowGarbageCollection no_gc;
+      Uint8ArrayToHexFastWithNeon(bytes, string_output->GetChars(no_gc),
+                                  length);
+    }
+    return *string_output;
+  }
+#endif
+
+  Uint8ArrayToHexSlow(bytes, length, string_output);
+  return *string_output;
 }
 
 #ifdef NEON64

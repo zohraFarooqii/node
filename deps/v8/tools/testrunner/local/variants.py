@@ -15,6 +15,16 @@ ALL_VARIANT_FLAGS = {
     "stress_regexp_jit": [["--regexp-tier-up-ticks=0"]],
     "experimental_regexp": [["--default-to-experimental-regexp-engine"]],
     "jitless": [["--jitless", "--wasm-jitless-if-available-for-testing"]],
+    # Jit-fuzzing variants pass --no-fail as most test conditions are violated.
+    # We only look for dchecks and crashes. As a result, negative tests like
+    # in the bugs/* directory are not supported.
+    "jit_fuzzing": [["--fuzzing", "--jit-fuzzing", "--no-fail"]],
+    "jit_fuzzing_maglev": [[
+        "--fuzzing",
+        "--jit-fuzzing",
+        "--optimize-on-next-call-optimizes-to-maglev",
+        "--no-fail",
+    ]],
     "sparkplug": [["--sparkplug"]],
     "maglev": [["--maglev"]],
     "maglev_future": [["--maglev", "--maglev-future"]],
@@ -34,15 +44,20 @@ ALL_VARIANT_FLAGS = {
         "--maglev", "--no-turbofan", "--stress-maglev",
         "--optimize-on-next-call-optimizes-to-maglev"
     ]],
+    "stress_pinning_scavenger": [[
+        "--scavenger-pinning-objects", "--stress-scavenger-pinning-objects"
+    ]],
     # We test both the JS and Wasm Turboshaft pipelines under the same variant.
     # For extended Wasm Turboshaft coverage, we add --no-liftoff to the options.
     "turboshaft": [[
         "--turboshaft",
-        "--turboshaft-future",
-        "--turboshaft-wasm",
         "--no-wasm-generic-wrapper",
-        "--no-wasm-to-js-generic-wrapper",
         "--no-liftoff",
+    ]],
+    # Turboshaft with Maglev as a frontend
+    "turbolev": [[
+        "--turboshaft",
+        "--turbolev",
     ]],
     "concurrent_sparkplug": [["--concurrent-sparkplug", "--sparkplug"]],
     "always_sparkplug": [["--always-sparkplug", "--sparkplug"]],
@@ -71,15 +86,17 @@ ALL_VARIANT_FLAGS = {
     "rehash_snapshot": [["--rehash-snapshot"]],
     "slow_path": [["--force-slow-path"]],
     "stress": [[
-        "--no-liftoff", "--stress-lazy-source-positions",
-        "--no-wasm-generic-wrapper", "--no-wasm-lazy-compilation",
-        "--no-wasm-to-js-generic-wrapper"
+        "--no-liftoff",
+        "--stress-lazy-source-positions",
+        "--no-wasm-generic-wrapper",
+        "--no-wasm-lazy-compilation",
     ]],
     "stress_concurrent_allocation": [["--stress-concurrent-allocation"]],
     "stress_concurrent_inlining": [["--stress-concurrent-inlining"]],
     "stress_js_bg_compile_wasm_code_gc": [[
         "--stress-background-compile", "--stress-wasm-code-gc"
     ]],
+    "stress_wasm_stack_switching": [["--stress-wasm-stack-switching"]],
     "stress_incremental_marking": [["--stress-incremental-marking"]],
     "stress_snapshot": [["--stress-snapshot"]],
     # Trigger stress sampling allocation profiler with sample interval = 2^14
@@ -107,15 +124,28 @@ kIncompatibleFlagsForNoTurbofan = [
 INCOMPATIBLE_FLAGS_PER_VARIANT = {
     "jitless":
         kIncompatibleFlagsForNoTurbofan + [
-            "--track-field-types", "--sparkplug", "--concurrent-sparkplug",
-            "--always-sparkplug", "--regexp-tier-up",
-            "--no-regexp-interpret-all", "--interpreted-frames-native-stack"
+            "--track-field-types",
+            "--sparkplug",
+            "--concurrent-sparkplug",
+            "--always-sparkplug",
+            "--regexp-tier-up",
+            "--no-regexp-interpret-all",
+            "--interpreted-frames-native-stack",
+            "--script-context-mutable-heap-number",
         ],
     "nooptimization": [
-        "--turbofan", "--always-turbofan", "--turboshaft",
-        "--turboshaft-future", "--maglev", "--no-liftoff", "--wasm-tier-up",
-        "--wasm-dynamic-tiering", "--validate-asm", "--track-field-types",
-        "--stress-concurrent-inlining"
+        "--turbofan",
+        "--always-turbofan",
+        "--turboshaft",
+        "--turboshaft-wasm-in-js-inlining",
+        "--maglev",
+        "--no-liftoff",
+        "--wasm-tier-up",
+        "--wasm-dynamic-tiering",
+        "--validate-asm",
+        "--track-field-types",
+        "--stress-concurrent-inlining",
+        "--script-context-mutable-heap-number",
     ],
     "slow_path": ["--no-force-slow-path"],
     "stress_concurrent_allocation": [
@@ -175,6 +205,7 @@ INCOMPATIBLE_FLAGS_PER_VARIANT = {
         "--concurrent-recompilation", "--stress_concurrent_inlining",
         "--no-assert-types"
     ],
+    "stress_wasm_stack_switching": ["--no-stress-wasm-stack-switching"],
     "--turboshaft-assert-types": [
         "--concurrent-recompilation", "--stress_concurrent_inlining",
         "--no-turboshaft-assert-types"
@@ -199,6 +230,7 @@ INCOMPATIBLE_FLAGS_PER_BUILD_VARIABLE = {
         "--dump_wasm_module",
         "--enable_testing_opcode_in_wasm",
         "--gc_verbose",
+        "--no-wasm-opt",
         "--print_ast",
         "--print_break_location",
         "--print_global_handles",
@@ -221,7 +253,6 @@ INCOMPATIBLE_FLAGS_PER_BUILD_VARIABLE = {
         "--trace_wasm_serialization",
         "--trace_wasm_stack_switching",
         "--trace_wasm_streaming",
-        "--trap_on_abort",
     ],
     "!verify_heap": ["--verify-heap"],
     "!debug_code": ["--debug-code"],

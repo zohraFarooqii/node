@@ -17,6 +17,7 @@ class ValueLocationConstraintProcessor {
  public:
   void PreProcessGraph(Graph* graph) {}
   void PostProcessGraph(Graph* graph) {}
+  void PostProcessBasicBlock(BasicBlock* block) {}
   BlockProcessResult PreProcessBasicBlock(BasicBlock* block) {
     return BlockProcessResult::kContinue;
   }
@@ -36,6 +37,7 @@ class DecompressedUseMarkingProcessor {
  public:
   void PreProcessGraph(Graph* graph) {}
   void PostProcessGraph(Graph* graph) {}
+  void PostProcessBasicBlock(BasicBlock* block) {}
   BlockProcessResult PreProcessBasicBlock(BasicBlock* block) {
     return BlockProcessResult::kContinue;
   }
@@ -57,6 +59,7 @@ class MaxCallDepthProcessor {
     graph->set_max_call_stack_args(max_call_stack_args_);
     graph->set_max_deopted_stack_size(max_deopted_stack_size_);
   }
+  void PostProcessBasicBlock(BasicBlock* block) {}
   BlockProcessResult PreProcessBasicBlock(BasicBlock* block) {
     return BlockProcessResult::kContinue;
   }
@@ -147,6 +150,7 @@ class LiveRangeAndNextUseProcessor {
 
   void PreProcessGraph(Graph* graph) {}
   void PostProcessGraph(Graph* graph) { DCHECK(loop_used_nodes_.empty()); }
+  void PostProcessBasicBlock(BasicBlock* block) {}
   BlockProcessResult PreProcessBasicBlock(BasicBlock* block) {
     if (!block->has_state()) return BlockProcessResult::kContinue;
     if (block->state()->is_loop()) {
@@ -200,7 +204,7 @@ class LiveRangeAndNextUseProcessor {
   // ranges.
 
   void MarkInputUses(JumpLoop* node, const ProcessingState& state) {
-    int i = state.block()->predecessor_id();
+    int predecessor_id = state.block()->predecessor_id();
     BasicBlock* target = node->target();
     uint32_t use = node->id();
 
@@ -213,8 +217,8 @@ class LiveRangeAndNextUseProcessor {
     if (target->has_phi()) {
       for (Phi* phi : *target->phis()) {
         DCHECK(phi->is_used());
-        ValueNode* input = phi->input(i).node();
-        MarkUse(input, use, &phi->input(i), outer_loop_used_nodes);
+        ValueNode* input = phi->input(predecessor_id).node();
+        MarkUse(input, use, &phi->input(predecessor_id), outer_loop_used_nodes);
       }
     }
 

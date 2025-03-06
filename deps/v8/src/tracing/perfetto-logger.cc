@@ -130,8 +130,8 @@ class IsolateRegistry {
     for (const auto& [isolate, listener] : isolates_) {
       isolate->RequestInterrupt(
           [](v8::Isolate*, void* data) {
-            PerfettoLogger* listener = reinterpret_cast<PerfettoLogger*>(data);
-            listener->LogExistingCode();
+            PerfettoLogger* logger = reinterpret_cast<PerfettoLogger*>(data);
+            logger->LogExistingCode();
           },
           listener.get());
     }
@@ -142,7 +142,7 @@ class IsolateRegistry {
   absl::flat_hash_map<Isolate*, std::unique_ptr<PerfettoLogger>> isolates_;
 };
 
-void WriteJsCode(const CodeTraceContext& ctx,
+void WriteJsCode(Isolate* isolate, const CodeTraceContext& ctx,
                  Tagged<AbstractCode> abstract_code, V8JsCode& code_proto) {
   if (IsBytecodeArray(abstract_code)) {
     Tagged<BytecodeArray> bytecode = abstract_code->GetBytecodeArray();
@@ -164,7 +164,7 @@ void WriteJsCode(const CodeTraceContext& ctx,
   switch (code->kind()) {
     case CodeKind::BUILTIN:
       if (code->builtin_id() == Builtin::kInterpreterEntryTrampoline) {
-        DCHECK(v8_flags.interpreted_frames_native_stack);
+        DCHECK(isolate->interpreted_frames_native_stack());
         DCHECK(code->has_instruction_stream());
         tier = V8JsCode::TIER_IGNITION;
         break;
@@ -185,7 +185,7 @@ void WriteJsCode(const CodeTraceContext& ctx,
     case CodeKind::MAGLEV:
       tier = V8JsCode::TIER_MAGLEV;
       break;
-    case CodeKind::TURBOFAN:
+    case CodeKind::TURBOFAN_JS:
       tier = V8JsCode::TIER_TURBOFAN;
       break;
 
@@ -250,7 +250,7 @@ PerfettoLogger::PerfettoLogger(Isolate* isolate) : isolate_(*isolate) {}
 PerfettoLogger::~PerfettoLogger() {}
 
 void PerfettoLogger::CodeCreateEvent(CodeTag tag,
-                                     Handle<AbstractCode> abstract_code,
+                                     DirectHandle<AbstractCode> abstract_code,
                                      const char* name) {
   DisallowGarbageCollection no_gc;
   if (!IsCode(*abstract_code)) return;
@@ -259,7 +259,7 @@ void PerfettoLogger::CodeCreateEvent(CodeTag tag,
   V8InternalCode::Type type = V8InternalCode::TYPE_UNKNOWN;
   switch (code->kind()) {
     case CodeKind::REGEXP:
-      RegExpCodeCreateEvent(abstract_code, Handle<String>());
+      RegExpCodeCreateEvent(abstract_code, DirectHandle<String>(), {});
       break;
     case CodeKind::BYTECODE_HANDLER:
       type = V8InternalCode::TYPE_BYTECODE_HANDLER;
@@ -289,7 +289,7 @@ void PerfettoLogger::CodeCreateEvent(CodeTag tag,
     case CodeKind::INTERPRETED_FUNCTION:
     case CodeKind::BASELINE:
     case CodeKind::MAGLEV:
-    case CodeKind::TURBOFAN:
+    case CodeKind::TURBOFAN_JS:
       UNREACHABLE();
   }
 
@@ -315,24 +315,24 @@ void PerfettoLogger::CodeCreateEvent(CodeTag tag,
 }
 
 void PerfettoLogger::CodeCreateEvent(CodeTag tag,
-                                     Handle<AbstractCode> abstract_code,
-                                     Handle<Name> name) {
+                                     DirectHandle<AbstractCode> abstract_code,
+                                     DirectHandle<Name> name) {
   DisallowGarbageCollection no_gc;
   if (!IsString(*name)) return;
   CodeCreateEvent(tag, abstract_code, Cast<String>(*name)->ToCString().get());
 }
 
 void PerfettoLogger::CodeCreateEvent(CodeTag tag,
-                                     Handle<AbstractCode> abstract_code,
-                                     Handle<SharedFunctionInfo> info,
-                                     Handle<Name> script_name) {
+                                     DirectHandle<AbstractCode> abstract_code,
+                                     DirectHandle<SharedFunctionInfo> info,
+                                     DirectHandle<Name> script_name) {
   CodeCreateEvent(tag, abstract_code, info, script_name, 0, 0);
 }
 
 void PerfettoLogger::CodeCreateEvent(CodeTag tag,
-                                     Handle<AbstractCode> abstract_code,
-                                     Handle<SharedFunctionInfo> info,
-                                     Handle<Name> script_name, int line,
+                                     DirectHandle<AbstractCode> abstract_code,
+                                     DirectHandle<SharedFunctionInfo> info,
+                                     DirectHandle<Name> script_name, int line,
                                      int column) {
   DisallowGarbageCollection no_gc;
   DCHECK(IsScript(info->script()));
@@ -347,7 +347,7 @@ void PerfettoLogger::CodeCreateEvent(CodeTag tag,
             isolate_, info,
             ctx.InternJsScript(isolate_, Cast<Script>(info->script())), line,
             column));
-        WriteJsCode(ctx, *abstract_code, *code_proto);
+        WriteJsCode(&isolate_, ctx, *abstract_code, *code_proto);
       });
 }
 #if V8_ENABLE_WEBASSEMBLY
@@ -378,13 +378,15 @@ void PerfettoLogger::CodeCreateEvent(CodeTag tag, const wasm::WasmCode* code,
 }
 #endif  // V8_ENABLE_WEBASSEMBLY
 
-void PerfettoLogger::CallbackEvent(Handle<Name> name, Address entry_point) {}
-void PerfettoLogger::GetterCallbackEvent(Handle<Name> name,
+void PerfettoLogger::CallbackEvent(DirectHandle<Name> name,
+                                   Address entry_point) {}
+void PerfettoLogger::GetterCallbackEvent(DirectHandle<Name> name,
                                          Address entry_point) {}
-void PerfettoLogger::SetterCallbackEvent(Handle<Name> name,
+void PerfettoLogger::SetterCallbackEvent(DirectHandle<Name> name,
                                          Address entry_point) {}
-void PerfettoLogger::RegExpCodeCreateEvent(Handle<AbstractCode> abstract_code,
-                                           Handle<String> pattern) {
+void PerfettoLogger::RegExpCodeCreateEvent(
+    DirectHandle<AbstractCode> abstract_code, DirectHandle<String> pattern,
+    RegExpFlags flags) {
   DisallowGarbageCollection no_gc;
   DCHECK(IsCode(*abstract_code));
   Tagged<Code> code = abstract_code->GetCode();
@@ -452,12 +454,14 @@ void PerfettoLogger::BytecodeMoveEvent(Tagged<BytecodeArray> from,
 void PerfettoLogger::SharedFunctionInfoMoveEvent(Address from, Address to) {}
 void PerfettoLogger::NativeContextMoveEvent(Address from, Address to) {}
 void PerfettoLogger::CodeMovingGCEvent() {}
-void PerfettoLogger::CodeDisableOptEvent(Handle<AbstractCode> code,
-                                         Handle<SharedFunctionInfo> shared) {}
-void PerfettoLogger::CodeDeoptEvent(Handle<Code> code, DeoptimizeKind kind,
-                                    Address pc, int fp_to_sp_delta) {}
+void PerfettoLogger::CodeDisableOptEvent(
+    DirectHandle<AbstractCode> code, DirectHandle<SharedFunctionInfo> shared) {}
+void PerfettoLogger::CodeDeoptEvent(DirectHandle<Code> code,
+                                    DeoptimizeKind kind, Address pc,
+                                    int fp_to_sp_delta) {}
 void PerfettoLogger::CodeDependencyChangeEvent(
-    Handle<Code> code, Handle<SharedFunctionInfo> shared, const char* reason) {}
+    DirectHandle<Code> code, DirectHandle<SharedFunctionInfo> shared,
+    const char* reason) {}
 void PerfettoLogger::WeakCodeClearEvent() {}
 
 bool PerfettoLogger::is_listening_to_code_events() { return true; }
